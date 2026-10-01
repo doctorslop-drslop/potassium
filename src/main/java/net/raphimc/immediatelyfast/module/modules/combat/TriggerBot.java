@@ -13,15 +13,18 @@ import net.raphimc.immediatelyfast.utils.EncryptedString;
 import net.raphimc.immediatelyfast.utils.MouseSimulation;
 import net.raphimc.immediatelyfast.utils.TimerUtils;
 import net.raphimc.immediatelyfast.utils.WorldUtils;
-import net.minecraft.component.DataComponentTypes;
 import net.minecraft.entity.Entity;
+import net.minecraft.entity.LivingEntity;
+import net.minecraft.entity.effect.StatusEffects;
 import net.minecraft.entity.mob.ZombieEntity;
 import net.minecraft.entity.player.PlayerEntity;
-import net.minecraft.fluid.Fluids;
-import net.minecraft.item.*;
+import net.minecraft.item.ItemStack;
+import net.minecraft.item.Items;
+import net.minecraft.registry.tag.ItemTags;
 import net.minecraft.util.hit.EntityHitResult;
-import net.minecraft.util.hit.HitResult;
 import org.lwjgl.glfw.GLFW;
+
+import java.util.concurrent.ThreadLocalRandom;
 
 public final class TriggerBot extends Module implements TickListener, AttackListener {
 	private final BooleanSetting inScreen = new BooleanSetting(EncryptedString.of("Work In Screen"), false)
@@ -36,10 +39,6 @@ public final class TriggerBot extends Module implements TickListener, AttackList
 			.setDescription(EncryptedString.of("Delay for swords"));
 	private final MinMaxSetting axeDelay = new MinMaxSetting(EncryptedString.of("Axe Delay"), 0, 1000, 1, 780, 800)
 			.setDescription(EncryptedString.of("Delay for axes"));
-	/*private final NumberSetting swordDelay = new NumberSetting(EncryptedString.of("Sword Delay"), 0, 1000, 550, 1)
-			.setDescription(EncryptedString.of("Delay for swords"));*/
-	/*private final NumberSetting axeDelay = new NumberSetting(EncryptedString.of("Axe Delay"), 0, 1000, 800, 1)
-			.setDescription(EncryptedString.of("Delay for axes"));*/
 	private final BooleanSetting checkShield = new BooleanSetting(EncryptedString.of("Check Shield"), false)
 			.setDescription(EncryptedString.of("Checks if the player is blocking your hits with a shield (Recommended with Shield Disabler)"));
 	private final BooleanSetting onlyCritSword = new BooleanSetting(EncryptedString.of("Only Crit Sword"), false)
@@ -61,8 +60,12 @@ public final class TriggerBot extends Module implements TickListener, AttackList
 	private final NumberSetting shieldTime = new NumberSetting(EncryptedString.of("Shield Time"), 100, 1000, 350, 1);
 	private final BooleanSetting sticky = new BooleanSetting(EncryptedString.of("Same Player"), false)
 			.setDescription(EncryptedString.of("Hits the player that was recently attacked, good for FFA"));
-	private final TimerUtils timer = new TimerUtils();
 
+	private final TimerUtils timer = new TimerUtils();
+	private final TimerUtils reactionTimer = new TimerUtils();
+
+	private Entity lastHoveredEntity = null;
+	private int currentReactionDelay = 0;
 	private int currentSwordDelay, currentAxeDelay;
 
 	public TriggerBot() {
@@ -77,6 +80,9 @@ public final class TriggerBot extends Module implements TickListener, AttackList
 	public void onEnable() {
 		currentSwordDelay = swordDelay.getRandomValueInt();
 		currentAxeDelay = axeDelay.getRandomValueInt();
+		lastHoveredEntity = null;
+		reactionTimer.reset();
+		currentReactionDelay = ThreadLocalRandom.current().nextInt(65, 125);
 
 		eventManager.add(TickListener.class, this);
 		eventManager.add(AttackListener.class, this);
@@ -85,140 +91,129 @@ public final class TriggerBot extends Module implements TickListener, AttackList
 
 	@Override
 	public void onDisable() {
+		lastHoveredEntity = null;
 		eventManager.remove(TickListener.class, this);
 		eventManager.remove(AttackListener.class, this);
 		super.onDisable();
 	}
 
-	@SuppressWarnings("all")
+	private boolean canCrit() {
+		return !mc.player.isOnGround()
+				&& mc.player.getVelocity().y < -0.01
+				&& !mc.player.isClimbing()
+				&& !mc.player.isSubmergedInWater()
+				&& !mc.player.hasStatusEffect(StatusEffects.BLINDNESS)
+				&& !mc.player.hasVehicle();
+	}
+
 	@Override
 	public void onTick() {
 		try {
-			if (!inScreen.getValue() && mc.currentScreen != null)
+			if (mc.player == null || mc.world == null) {
+				lastHoveredEntity = null;
+				return;
+			}
+
+			if (!inScreen.getValue() && mc.currentScreen != null) {
+				lastHoveredEntity = null;
+				return;
+			}
+
+			if (Argon.INSTANCE.getModuleManager().getModule(Friends.class).antiAttack.getValue() && Argon.INSTANCE.getFriendManager().isAimingOverFriend()) {
+				lastHoveredEntity = null;
+				return;
+			}
+
+			if (onLeftClick.getValue() && GLFW.glfwGetMouseButton(mc.getWindow().getHandle(), GLFW.GLFW_MOUSE_BUTTON_LEFT) != GLFW.GLFW_PRESS) {
+				lastHoveredEntity = null;
+				return;
+			}
+
+			if (mc.player.isUsingItem() && !whileUse.getValue())
 				return;
 
-			if(Argon.INSTANCE.getModuleManager().getModule(Friends.class).antiAttack.getValue() && Argon.INSTANCE.getFriendManager().isAimingOverFriend())
+			if (!whileAscend.getValue() && !mc.player.isOnGround() && mc.player.getVelocity().y > 0)
 				return;
 
-			Item item = mc.player.getMainHandStack().getItem();
+			ItemStack mainHand = mc.player.getMainHandStack();
+			boolean isSword = mainHand.isIn(ItemTags.SWORDS);
+			boolean isAxe = mainHand.isIn(ItemTags.AXES);
 
-			if (onLeftClick.getValue() && GLFW.glfwGetMouseButton(mc.getWindow().getHandle(), GLFW.GLFW_MOUSE_BUTTON_LEFT) != GLFW.GLFW_PRESS)
+			if (!allItems.getValue() && !isSword && !isAxe) {
+				lastHoveredEntity = null;
+				return;
+			}
+
+			if (!(mc.crosshairTarget instanceof EntityHitResult hit)) {
+				lastHoveredEntity = null;
+				return;
+			}
+
+			Entity entity = hit.getEntity();
+			if (entity == null) {
+				lastHoveredEntity = null;
+				return;
+			}
+
+			if (entity != lastHoveredEntity) {
+				lastHoveredEntity = entity;
+				reactionTimer.reset();
+				currentReactionDelay = ThreadLocalRandom.current().nextInt(65, 125);
+				return;
+			}
+
+			if (!reactionTimer.delay(currentReactionDelay))
 				return;
 
-			if (((mc.player.getOffHandStack().getItem().getComponents().contains(DataComponentTypes.FOOD) || mc.player.getOffHandStack().getItem() instanceof ShieldItem) && GLFW.glfwGetMouseButton(mc.getWindow().getHandle(), GLFW.GLFW_MOUSE_BUTTON_RIGHT) == GLFW.GLFW_PRESS) && !whileUse.getValue())
+			boolean isValidTarget = (entity instanceof PlayerEntity)
+					|| (strayBypass.getValue() && entity instanceof ZombieEntity)
+					|| (allEntities.getValue() && entity instanceof LivingEntity);
+
+			if (!isValidTarget)
 				return;
-			
-			if (!whileAscend.getValue() && ((!mc.player.isOnGround() && mc.player.getVelocity().y > 0) || (!mc.player.isOnGround() && mc.player.fallDistance <= 0.0F)))
+
+			if (sticky.getValue() && mc.player.getAttacking() != null && entity != mc.player.getAttacking())
 				return;
 
-			if (!allItems.getValue()) {
-				if (item instanceof SwordItem) {
-					if (mc.crosshairTarget instanceof EntityHitResult hit) {
-						Entity entity = hit.getEntity();
+			if (entity instanceof PlayerEntity player && checkShield.getValue() && player.isBlocking() && !WorldUtils.isShieldFacingAway(player))
+				return;
 
-						assert mc.player.getAttacking() != null;
-						if (sticky.getValue() && entity != mc.player.getAttacking())
-							return;
+			if (isSword && onlyCritSword.getValue() && !canCrit())
+				return;
 
-						if (entity instanceof PlayerEntity || (strayBypass.getValue() && entity instanceof ZombieEntity) || (allEntities.getValue() && entity != null)) {
+			if (isAxe && onlyCritAxe.getValue() && !canCrit())
+				return;
 
-							if (entity instanceof PlayerEntity player) {
-								if (checkShield.getValue() && player.isBlocking() && !WorldUtils.isShieldFacingAway(player))
-									return;
-							}
+			if (!isSword && !isAxe && onlyCritSword.getValue() && !canCrit())
+				return;
 
-							if (onlyCritSword.getValue() && mc.player.fallDistance <= 0.0F)
-								return;
+			int delay = isAxe ? currentAxeDelay : currentSwordDelay;
 
-							if (timer.delay(currentSwordDelay)) {
-								if (useShield.getValue()) {
-									if (mc.player.getOffHandStack().getItem() == Items.SHIELD && mc.player.isBlocking())
-										MouseSimulation.mouseRelease(GLFW.GLFW_MOUSE_BUTTON_RIGHT);
-								}
+			if (timer.delay(delay)) {
+				ItemStack offHand = mc.player.getOffHandStack();
+				if (useShield.getValue() && offHand.isOf(Items.SHIELD) && mc.player.isBlocking())
+					MouseSimulation.mouseRelease(GLFW.GLFW_MOUSE_BUTTON_RIGHT);
 
-								WorldUtils.hitEntity(entity, swing.getValue());
+				WorldUtils.hitEntity(entity, swing.getValue());
 
-								if (clickSimulation.getValue())
-									MouseSimulation.mouseClick(GLFW.GLFW_MOUSE_BUTTON_LEFT);
-
-								currentSwordDelay = swordDelay.getRandomValueInt();
-								timer.reset();
-							} else {
-								if (useShield.getValue()) {
-									if (mc.player.getOffHandStack().getItem() == Items.SHIELD) {
-										int useFor = shieldTime.getValueInt();
-										MouseSimulation.mouseClick(GLFW.GLFW_MOUSE_BUTTON_RIGHT, useFor);
-									}
-								}
-							}
-						}
-					}
-				} else if (item instanceof AxeItem) {
-					if (mc.crosshairTarget instanceof EntityHitResult hit) {
-						Entity entity = hit.getEntity();
-
-						if (entity instanceof PlayerEntity || (strayBypass.getValue() && entity instanceof ZombieEntity) || (allEntities.getValue() && entity != null)) {
-							if (entity instanceof PlayerEntity player) {
-								if (checkShield.getValue() && player.isBlocking() && !WorldUtils.isShieldFacingAway(player))
-									return;
-							}
-
-							if (onlyCritAxe.getValue() && mc.player.fallDistance <= 0.0F)
-								return;
-
-							if (timer.delay(currentAxeDelay)) {
-								WorldUtils.hitEntity(entity, swing.getValue());
-
-								if (clickSimulation.getValue())
-									MouseSimulation.mouseClick(GLFW.GLFW_MOUSE_BUTTON_LEFT);
-
-								currentAxeDelay = axeDelay.getRandomValueInt();
-								timer.reset();
-							} else {
-								if (useShield.getValue()) {
-									if (mc.player.getOffHandStack().getItem() == Items.SHIELD) {
-										int useFor = shieldTime.getValueInt();
-										MouseSimulation.mouseClick(GLFW.GLFW_MOUSE_BUTTON_RIGHT, useFor);
-									}
-								}
-							}
-						}
-					}
+				if (clickSimulation.getValue()) {
+					int clickDuration = ThreadLocalRandom.current().nextInt(35, 70);
+					MouseSimulation.mouseClick(GLFW.GLFW_MOUSE_BUTTON_LEFT, clickDuration);
 				}
+
+				int jitter = ThreadLocalRandom.current().nextInt(-15, 20);
+				if (isAxe) {
+					currentAxeDelay = Math.max(50, axeDelay.getRandomValueInt() + jitter);
+				} else {
+					currentSwordDelay = Math.max(50, swordDelay.getRandomValueInt() + jitter);
+				}
+				timer.reset();
 			} else {
-				if (mc.crosshairTarget instanceof EntityHitResult entityHit && mc.crosshairTarget.getType() == HitResult.Type.ENTITY) {
-					Entity entity = entityHit.getEntity();
-
-					assert mc.player.getAttacking() != null;
-					if (sticky.getValue() && entity != mc.player.getAttacking())
-						return;
-
-					if (entity instanceof PlayerEntity || (strayBypass.getValue() && entity instanceof ZombieEntity) || (allEntities.getValue() && entity != null)) {
-						if (entity instanceof PlayerEntity player) {
-							if (checkShield.getValue() && player.isBlocking() && !WorldUtils.isShieldFacingAway(player))
-								return;
-						}
-
-						if (onlyCritSword.getValue() && mc.player.fallDistance <= 0.0F)
-							return;
-
-						if (timer.delay(currentSwordDelay)) {
-							WorldUtils.hitEntity(entity, swing.getValue());
-
-							if (clickSimulation.getValue())
-								MouseSimulation.mouseClick(GLFW.GLFW_MOUSE_BUTTON_LEFT);
-
-							currentSwordDelay = swordDelay.getRandomValueInt();
-							timer.reset();
-						} else {
-							if (useShield.getValue()) {
-								if (mc.player.getOffHandStack().getItem() == Items.SHIELD) {
-									int useFor = shieldTime.getValueInt();
-									MouseSimulation.mouseClick(GLFW.GLFW_MOUSE_BUTTON_RIGHT, useFor);
-								}
-							}
-						}
-					}
+				ItemStack offHand = mc.player.getOffHandStack();
+				if (useShield.getValue() && offHand.isOf(Items.SHIELD) && !mc.player.isBlocking()) {
+					int shieldJitter = ThreadLocalRandom.current().nextInt(-25, 25);
+					int useFor = Math.max(100, shieldTime.getValueInt() + shieldJitter);
+					MouseSimulation.mouseClick(GLFW.GLFW_MOUSE_BUTTON_RIGHT, useFor);
 				}
 			}
 		} catch (Exception ignored) {}
@@ -226,7 +221,7 @@ public final class TriggerBot extends Module implements TickListener, AttackList
 
 	@Override
 	public void onAttack(AttackEvent event) {
-		if (GLFW.glfwGetMouseButton(mc.getWindow().getHandle(), GLFW.GLFW_MOUSE_BUTTON_LEFT) != GLFW.GLFW_PRESS)
+		if (onLeftClick.getValue() && GLFW.glfwGetMouseButton(mc.getWindow().getHandle(), GLFW.GLFW_MOUSE_BUTTON_LEFT) != GLFW.GLFW_PRESS)
 			event.cancel();
 	}
 }
