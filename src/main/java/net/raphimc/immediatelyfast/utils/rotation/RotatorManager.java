@@ -3,165 +3,203 @@ package net.raphimc.immediatelyfast.utils.rotation;
 import net.raphimc.immediatelyfast.Argon;
 import net.raphimc.immediatelyfast.event.EventManager;
 import net.raphimc.immediatelyfast.event.events.*;
-import net.raphimc.immediatelyfast.utils.RotationUtils;
 
 import net.minecraft.network.packet.c2s.play.PlayerMoveC2SPacket;
 import net.minecraft.network.packet.s2c.play.PlayerPositionLookS2CPacket;
+import net.minecraft.network.packet.s2c.play.PositionFlag;
+
+import java.util.concurrent.ThreadLocalRandom;
 
 import static net.raphimc.immediatelyfast.Argon.mc;
 
-
 public final class RotatorManager implements PacketSendListener, BlockBreakingListener, ItemUseListener, AttackListener, MovementPacketListener, PacketReceiveListener {
-	private boolean enabled;
-	private boolean rotateBack;
-	private boolean resetRotation;
-	private final EventManager eventManager = Argon.INSTANCE.eventManager;
-	private Rotation currentRotation;
-	private float clientYaw, clientPitch;
-	private float serverYaw, serverPitch;
+    private boolean enabled;
+    private boolean rotateBack;
+    private final EventManager eventManager = Argon.INSTANCE.eventManager;
 
-	public RotatorManager() {
-		eventManager.remove(PacketSendListener.class, this);
-		eventManager.remove(AttackListener.class, this);
-		eventManager.remove(ItemUseListener.class, this);
-		eventManager.remove(MovementPacketListener.class, this);
-		eventManager.remove(PacketReceiveListener.class, this);
-		eventManager.remove(BlockBreakingListener.class, this);
+    private Rotation currentRotation;
+    private float serverYaw, serverPitch;
+    private boolean wasDisabled;
 
+    public RotatorManager() {
+        eventManager.add(PacketSendListener.class, this);
+        eventManager.add(AttackListener.class, this);
+        eventManager.add(ItemUseListener.class, this);
+        eventManager.add(MovementPacketListener.class, this);
+        eventManager.add(PacketReceiveListener.class, this);
+        eventManager.add(BlockBreakingListener.class, this);
 
-		enabled = true;
-		rotateBack = false;
-		resetRotation = false;
+        this.enabled = true;
+        this.rotateBack = false;
+        this.serverYaw = 0;
+        this.serverPitch = 0;
+    }
 
-		this.serverYaw = 0;
-		this.serverPitch = 0;
+    public void shutDown() {
+        eventManager.remove(PacketSendListener.class, this);
+        eventManager.remove(AttackListener.class, this);
+        eventManager.remove(ItemUseListener.class, this);
+        eventManager.remove(MovementPacketListener.class, this);
+        eventManager.remove(PacketReceiveListener.class, this);
+        eventManager.remove(BlockBreakingListener.class, this);
+    }
 
-		this.clientYaw = 0;
-		this.clientPitch = 0;
-	}
+    private float getHumanNoise(float intensity) {
+        return (float) (ThreadLocalRandom.current().nextGaussian() * intensity);
+    }
 
-	public void shutDown() {
-		eventManager.remove(PacketSendListener.class, this);
-		eventManager.remove(AttackListener.class, this);
-		eventManager.remove(ItemUseListener.class, this);
-		eventManager.remove(MovementPacketListener.class, this);
-		eventManager.remove(PacketReceiveListener.class, this);
-		eventManager.remove(BlockBreakingListener.class, this);
-	}
+    private float wrapDegrees(float angle) {
+        float wrapped = angle % 360.0f;
+        if (wrapped >= 180.0f) wrapped -= 360.0f;
+        if (wrapped < -180.0f) wrapped += 360.0f;
+        return wrapped;
+    }
 
-	public Rotation getServerRotation() {
-		return new Rotation(serverYaw, serverPitch);
-	}
+    private float getSensStep() {
+        if (mc.options == null) return 0.1f;
+        float sens = mc.options.getMouseSensitivity().getValue().floatValue();
+        float f = sens * 0.6f + 0.2f;
+        return f * f * f * 1.2f;
+    }
 
-	public void enable() {
-		enabled = true;
-		rotateBack = false;
-	}
+    private float applyGcd(float delta, float step) {
+        return Math.round(delta / step) * step;
+    }
 
-	public boolean isEnabled() {
-		return enabled;
-	}
+    public void setRotation(Rotation rotation) {
+        if (mc.player == null || rotation == null) return;
+        this.currentRotation = rotation;
+    }
 
-	public void disable() {
-		if (isEnabled()) {
-			enabled = false;
-			if (!rotateBack) rotateBack = true;
-		}
-	}
+    public void setRotation(double yaw, double pitch) {
+        setRotation(new Rotation(yaw, pitch));
+    }
 
-	public void setRotation(Rotation rotation) {
-		currentRotation = rotation;
-	}
+    @Override
+    public void onSendMovementPackets() {
+        if (mc.player == null) return;
 
-	public void setRotation(double yaw, double pitch) {
-		setRotation(new Rotation(yaw, pitch));
-	}
+        if (isEnabled() && currentRotation != null) {
+            float playerYaw = mc.player.getYaw();
+            float playerPitch = mc.player.getPitch();
 
-	private void resetClientRotation() {
-		mc.player.setYaw(clientYaw);
-		mc.player.setPitch(clientPitch);
+            float diffYaw = wrapDegrees((float) currentRotation.yaw() - playerYaw);
+            float diffPitch = (float) currentRotation.pitch() - playerPitch;
 
-		resetRotation = false;
-	}
+            float step = getSensStep();
 
-	public void setClientRotation(Rotation rotation) {
-		this.clientYaw = mc.player.getYaw();
-		this.clientPitch = mc.player.getPitch();
+            float speedFactor = (float) ThreadLocalRandom.current().nextDouble(0.35, 0.55);
+            float yawNoise = getHumanNoise(0.08f);
+            float pitchNoise = getHumanNoise(0.08f);
 
-		mc.player.setYaw((float) rotation.yaw());
-		mc.player.setPitch((float) rotation.pitch());
+            float deltaYaw = applyGcd((diffYaw * speedFactor) + yawNoise, step);
+            float deltaPitch = applyGcd((diffPitch * speedFactor) + pitchNoise, step);
 
-		resetRotation = true;
-	}
+            float nextYaw = wrapDegrees(playerYaw + deltaYaw);
+            float nextPitch = Math.max(-90.0f, Math.min(90.0f, playerPitch + deltaPitch));
 
-	public void setServerRotation(Rotation rotation) {
-		this.serverYaw = (float) rotation.yaw();
-		this.serverPitch = (float) rotation.pitch();
-	}
+            mc.player.setYaw(nextYaw);
+            mc.player.setPitch(nextPitch);
+            serverYaw = nextYaw;
+            serverPitch = nextPitch;
+            return;
+        }
 
-	private boolean wasDisabled;
+        if (rotateBack) {
+            float playerYaw = mc.player.getYaw();
+            float playerPitch = mc.player.getPitch();
 
-	@Override
-	public void onAttack(AttackEvent event) {
-		if (!isEnabled() && wasDisabled) {
-			enabled = true;
-			wasDisabled = false;
-		}
-	}
+            float diffYaw = wrapDegrees(playerYaw - serverYaw);
+            float diffPitch = playerPitch - serverPitch;
 
-	@Override
-	public void onItemUse(ItemUseEvent event) {
-		if (!event.isCancelled() && isEnabled()) {
-			enabled = false;
-			wasDisabled = true;
-		}
-	}
+            if (Math.abs(diffYaw) > 0.8f || Math.abs(diffPitch) > 0.8f) {
+                float step = getSensStep();
 
-	@Override
-	public void onPacketSend(PacketSendEvent event) {
-		if (event.packet instanceof PlayerMoveC2SPacket packet) {
-			serverYaw = packet.getYaw(serverYaw);
-			serverPitch = packet.getPitch(serverPitch);
-		}
-	}
+                float returnSpeed = (float) ThreadLocalRandom.current().nextDouble(0.20, 0.35);
+                float deltaYaw = applyGcd(diffYaw * returnSpeed, step);
+                float deltaPitch = applyGcd(diffPitch * returnSpeed, step);
 
-	@Override
-	public void onBlockBreaking(BlockBreakingEvent event) {
-		if (!event.isCancelled() && isEnabled()) {
-			enabled = false;
-			wasDisabled = true;
-		}
-	}
+                serverYaw = wrapDegrees(serverYaw + deltaYaw);
+                serverPitch = Math.max(-90.0f, Math.min(90.0f, serverPitch + deltaPitch));
 
-	@Override
-	public void onSendMovementPackets() {
-		if (isEnabled() && currentRotation != null) {
-			setClientRotation(currentRotation);
-			setServerRotation(currentRotation);
+                mc.player.setYaw(serverYaw);
+                mc.player.setPitch(serverPitch);
+            } else {
+                rotateBack = false;
+                currentRotation = null;
+            }
+        }
+    }
 
-			return;
-		}
+    @Override
+    public void onAttack(AttackEvent event) {
+        if (!isEnabled() && wasDisabled) {
+            enabled = true;
+            wasDisabled = false;
+        }
+    }
 
-		if (rotateBack) {
-			Rotation serverRot = new Rotation(serverYaw, serverPitch);
-			Rotation clientRot = new Rotation(mc.player.getYaw(), mc.player.getPitch());
+    @Override
+    public void onItemUse(ItemUseEvent event) {
+        if (!event.isCancelled() && isEnabled()) {
+            enabled = false;
+            wasDisabled = true;
+        }
+    }
 
-			if (RotationUtils.getTotalDiff(serverRot, clientRot) > 1) {
-				Rotation smoothRotation = RotationUtils.getSmoothRotation(serverRot, clientRot, 0.2);
+    @Override
+    public void onBlockBreaking(BlockBreakingEvent event) {
+        if (!event.isCancelled() && isEnabled()) {
+            enabled = false;
+            wasDisabled = true;
+        }
+    }
 
-				setClientRotation(smoothRotation);
-				setServerRotation(smoothRotation);
-			} else {
-				rotateBack = false;
-			}
-		}
-	}
+    @Override
+    public void onPacketSend(PacketSendEvent event) {
+        if (event.packet instanceof PlayerMoveC2SPacket packet) {
+            serverYaw = packet.getYaw(serverYaw);
+            serverPitch = packet.getPitch(serverPitch);
+        }
+    }
 
-	@Override
-	public void onPacketReceive(PacketReceiveEvent event) {
-		if (event.packet instanceof PlayerPositionLookS2CPacket packet) {
-			serverYaw = packet.change().yaw();
-			serverPitch = packet.change().pitch();
-		}
-	}
+    @Override
+    public void onPacketReceive(PacketReceiveEvent event) {
+        if (event.packet instanceof PlayerPositionLookS2CPacket packet) {
+            float newYaw = packet.change().yaw();
+            float newPitch = packet.change().pitch();
+
+            if (packet.relatives().contains(PositionFlag.Y_ROT)) {
+                serverYaw = wrapDegrees(serverYaw + newYaw);
+            } else {
+                serverYaw = wrapDegrees(newYaw);
+            }
+
+            if (packet.relatives().contains(PositionFlag.X_ROT)) {
+                serverPitch = Math.max(-90.0f, Math.min(90.0f, serverPitch + newPitch));
+            } else {
+                serverPitch = Math.max(-90.0f, Math.min(90.0f, newPitch));
+            }
+        }
+    }
+
+    public boolean isEnabled() {
+        return enabled;
+    }
+
+    public void enable() {
+        enabled = true;
+        rotateBack = false;
+    }
+
+    public void disable() {
+        if (isEnabled()) {
+            enabled = false;
+            rotateBack = true;
+        }
+    }
+
+    public Rotation getServerRotation() {
+        return new Rotation(serverYaw, serverPitch);
+    }
 }
