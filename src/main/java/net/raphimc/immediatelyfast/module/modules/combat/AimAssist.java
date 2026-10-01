@@ -10,7 +10,6 @@ import net.raphimc.immediatelyfast.module.setting.ModeSetting;
 import net.raphimc.immediatelyfast.module.setting.NumberSetting;
 import net.raphimc.immediatelyfast.utils.*;
 import net.raphimc.immediatelyfast.utils.rotation.Rotation;
-import net.minecraft.client.render.RenderTickCounter;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.item.AxeItem;
 import net.minecraft.item.SwordItem;
@@ -18,6 +17,8 @@ import net.minecraft.util.hit.EntityHitResult;
 import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec3d;
 import org.lwjgl.glfw.GLFW;
+
+import java.util.concurrent.ThreadLocalRandom;
 
 public final class AimAssist extends Module implements HudListener, MouseMoveListener {
 	private final BooleanSetting stickyAim = new BooleanSetting(EncryptedString.of("Sticky Aim"), false)
@@ -35,19 +36,19 @@ public final class AimAssist extends Module implements HudListener, MouseMoveLis
 	private final BooleanSetting stopAtTargetHorizontal = new BooleanSetting(EncryptedString.of("Stop at Target Horiz"), false)
 			.setDescription(EncryptedString.of("Stops horizontally assisting if already aiming at the entity, helps bypass anti-cheat"));
 
-	private final NumberSetting radius = new NumberSetting(EncryptedString.of("Radius"), 0.1, 6, 5, 0.1);
+	private final NumberSetting radius = new NumberSetting(EncryptedString.of("Radius"), 0.1, 12, 5, 0.1);
 
 	private final BooleanSetting seeOnly = new BooleanSetting(EncryptedString.of("Visible Only"), true);
-    private final BooleanSetting ignoreNoHP = new BooleanSetting(EncryptedString.of("Ignore 0 HP"), false)
+	private final BooleanSetting ignoreNoHP = new BooleanSetting(EncryptedString.of("Ignore 0 HP"), false)
 			.setDescription(EncryptedString.of("Stops assisting if target entity has 0 HP (is dead)"));
 	private final BooleanSetting lookAtNearest = new BooleanSetting(EncryptedString.of("Look at Nearest"), false);
 
-	private final NumberSetting fov = new NumberSetting(EncryptedString.of("FOV"), 5, 360, 180, 1);
+	private final NumberSetting fov = new NumberSetting(EncryptedString.of("FOV"), 1, 360, 180, 1);
 
-	private final MinMaxSetting pitchSpeed = new MinMaxSetting(EncryptedString.of("Vertical Speed"), 0, 10, 0.1, 2, 4);
-	private final MinMaxSetting yawSpeed = new MinMaxSetting(EncryptedString.of("Horizontal Speed"), 0, 10, 0.1, 2, 4);
+	private final MinMaxSetting pitchSpeed = new MinMaxSetting(EncryptedString.of("Vertical Speed"), 0, 25, 0.1, 2, 5);
+	private final MinMaxSetting yawSpeed = new MinMaxSetting(EncryptedString.of("Horizontal Speed"), 0, 25, 0.1, 2, 5);
 
-	private final NumberSetting speedChange = new NumberSetting(EncryptedString.of("Speed Delay"), 0, 1000, 250, 1)
+	private final NumberSetting speedChange = new NumberSetting(EncryptedString.of("Speed Delay"), 0, 2000, 250, 10)
 			.setDescription(EncryptedString.of("Time in milliseconds to wait after resetting random speed"));
 
 	private final NumberSetting randomization = new NumberSetting(EncryptedString.of("Chance"), 0, 100, 50, 1);
@@ -55,7 +56,7 @@ public final class AimAssist extends Module implements HudListener, MouseMoveLis
 	private final BooleanSetting yawAssist = new BooleanSetting(EncryptedString.of("Horizontal"), true);
 	private final BooleanSetting pitchAssist = new BooleanSetting(EncryptedString.of("Vertical"), true);
 
-	private final NumberSetting waitFor = new NumberSetting(EncryptedString.of("Wait on Move"), 0, 1000, 0, 1)
+	private final NumberSetting waitFor = new NumberSetting(EncryptedString.of("Wait on Move"), 0, 2000, 0, 10)
 			.setDescription(EncryptedString.of("After you move your mouse aim assist will stop working for the selected amount of time"));
 
 	private final ModeSetting<LerpMode> lerp = new ModeSetting<>(EncryptedString.of("Lerp"), LerpMode.Normal, LerpMode.class)
@@ -67,7 +68,9 @@ public final class AimAssist extends Module implements HudListener, MouseMoveLis
 	private final TimerUtils timer = new TimerUtils();
 	private final TimerUtils resetSpeed = new TimerUtils();
 	private boolean move;
-	private float pitch, yaw;
+	private float currentPitchSpeed, currentYawSpeed;
+	private float yawAccumulator = 0.0f;
+	private float pitchAccumulator = 0.0f;
 
 	@SuppressWarnings("unused")
 	public enum PosMode {
@@ -79,7 +82,7 @@ public final class AimAssist extends Module implements HudListener, MouseMoveLis
 	}
 
 	public enum LerpMode {
-		Normal, Smoothstep, EaseOut
+		Normal, Smoothstep, Curve
 	}
 
 	public AimAssist() {
@@ -94,8 +97,10 @@ public final class AimAssist extends Module implements HudListener, MouseMoveLis
 	@Override
 	public void onEnable() {
 		move = true;
-		pitch = pitchSpeed.getRandomValueFloat();
-		yaw = yawSpeed.getRandomValueFloat();
+		currentPitchSpeed = pitchSpeed.getRandomValueFloat();
+		currentYawSpeed = yawSpeed.getRandomValueFloat();
+		yawAccumulator = 0.0f;
+		pitchAccumulator = 0.0f;
 
 		eventManager.add(HudListener.class, this);
 		eventManager.add(MouseMoveListener.class, this);
@@ -108,7 +113,16 @@ public final class AimAssist extends Module implements HudListener, MouseMoveLis
 	public void onDisable() {
 		eventManager.remove(HudListener.class, this);
 		eventManager.remove(MouseMoveListener.class, this);
+		yawAccumulator = 0.0f;
+		pitchAccumulator = 0.0f;
 		super.onDisable();
+	}
+
+	private float getSensStep() {
+		if (mc.options == null) return 0.1f;
+		float sens = mc.options.getMouseSensitivity().getValue().floatValue();
+		float f = sens * 0.6f + 0.2f;
+		return f * f * f * 1.2f;
 	}
 
 	@Override
@@ -134,13 +148,13 @@ public final class AimAssist extends Module implements HudListener, MouseMoveLis
 		if (target == null || (target.getHealth() <= 0.0F && ignoreNoHP.getValue()))
 			return;
 
-		if(resetSpeed.delay(speedChange.getValueFloat())) {
-			pitch = pitchSpeed.getRandomValueFloat();
-			yaw = yawSpeed.getRandomValueFloat();
+		if (resetSpeed.delay(speedChange.getValueFloat())) {
+			currentPitchSpeed = pitchSpeed.getRandomValueFloat();
+			currentYawSpeed = yawSpeed.getRandomValueFloat();
 			resetSpeed.reset();
 		}
 
-		Vec3d targetPos = posMode.isMode(PosMode.Normal) ? target.getPos() : target.getLerpedPos(RenderTickCounter.ONE.getTickDelta(true));
+		Vec3d targetPos = posMode.isMode(PosMode.Normal) ? target.getPos() : target.getLerpedPos(mc.getRenderTickCounter().getTickProgress(true));
 
 		if (aimAt.isMode(AimMode.Chest))
 			targetPos = targetPos.add(0, -0.5, 0);
@@ -159,41 +173,52 @@ public final class AimAssist extends Module implements HudListener, MouseMoveLis
 		if (angleToRotation > (double) fov.getValueInt() / 2)
 			return;
 
-		float yawStrength = yaw / 50;
-		float pitchStrength = pitch / 50;
+		float frameFactor = Math.min(2.0f, Math.max(0.1f, mc.getLastFrameDuration()));
+		float yawStrength = (currentYawSpeed / 50.0f) * frameFactor;
+		float pitchStrength = (currentPitchSpeed / 50.0f) * frameFactor;
 
-		float yaw = mc.player.getYaw();
-		float pitch = mc.player.getPitch();
+		float playerYaw = mc.player.getYaw();
+		float playerPitch = mc.player.getPitch();
+
+		float targetYaw = playerYaw;
+		float targetPitch = playerPitch;
 
 		if (lerp.isMode(LerpMode.Smoothstep)) {
-			yaw = (float) smoothStepLerp(yawStrength, mc.player.getYaw(), (float) rotation.yaw());
-			pitch = (float) smoothStepLerp(pitchStrength, mc.player.getPitch(), (float) rotation.pitch());
+			targetYaw = (float) smoothStepLerp(yawStrength, playerYaw, (float) rotation.yaw());
+			targetPitch = (float) smoothStepLerp(pitchStrength, playerPitch, (float) rotation.pitch());
+		} else if (lerp.isMode(LerpMode.Normal)) {
+			targetYaw = lerp(yawStrength, playerYaw, (float) rotation.yaw());
+			targetPitch = lerp(pitchStrength, playerPitch, (float) rotation.pitch());
+		} else if (lerp.isMode(LerpMode.Curve)) {
+			targetYaw = (float) curveLerp(yawStrength, playerYaw, rotation.yaw());
+			targetPitch = (float) curveLerp(pitchStrength, playerPitch, rotation.pitch());
 		}
 
-		if (lerp.isMode(LerpMode.Normal)) {
-			yaw = lerp(yawStrength, mc.player.getYaw(), (float) (rotation.yaw()));
-			pitch = lerp(pitchStrength, mc.player.getPitch(), (float) (rotation.pitch()));
-		}
+		if (MathUtils.randomInt(1, 100) <= randomization.getValueInt() && move) {
+			float step = getSensStep();
+			float deltaYaw = MathHelper.wrapDegrees(targetYaw - playerYaw);
+			float deltaPitch = targetPitch - playerPitch;
 
-		if (lerp.isMode(LerpMode.EaseOut)) {
-			yaw = (float) easeOutBackDegrees(mc.player.getYaw(), rotation.yaw(), yawStrength * mc.getRenderTickCounter().getLastFrameDuration());
-			pitch = (float) easeOutBackDegrees(mc.player.getPitch(), rotation.pitch(), pitchStrength * mc.getRenderTickCounter().getLastFrameDuration());
-		}
+			yawAccumulator += deltaYaw;
+			pitchAccumulator += deltaPitch;
 
-		if (MathUtils.randomInt(1, 100) <= randomization.getValueInt()) {
-			if (move) {
-				if (yawAssist.getValue()) {
-					if(stopAtTargetHorizontal.getValue() && WorldUtils.getHitResult(radius.getValue()) instanceof EntityHitResult hitResult && hitResult.getEntity() == target)
-						return;
+			float gcdYaw = (int) (yawAccumulator / step) * step;
+			float gcdPitch = (int) (pitchAccumulator / step) * step;
 
-					mc.player.setYaw(yaw);
+			if (yawAssist.getValue() && Math.abs(gcdYaw) > 0.0f) {
+				boolean skipYaw = stopAtTargetHorizontal.getValue() && WorldUtils.getHitResult(radius.getValue()) instanceof EntityHitResult hitResult && hitResult.getEntity() == target;
+				if (!skipYaw) {
+					mc.player.setYaw(MathHelper.wrapDegrees(playerYaw + gcdYaw));
+					yawAccumulator -= gcdYaw;
 				}
+			}
 
-				if (pitchAssist.getValue()) {
-					if(stopAtTargetVertical.getValue() && WorldUtils.getHitResult(radius.getValue()) instanceof EntityHitResult hitResult && hitResult.getEntity() == target)
-						return;
-
-					mc.player.setPitch(pitch);
+			if (pitchAssist.getValue() && Math.abs(gcdPitch) > 0.0f) {
+				boolean skipPitch = stopAtTargetVertical.getValue() && WorldUtils.getHitResult(radius.getValue()) instanceof EntityHitResult hitResult && hitResult.getEntity() == target;
+				if (!skipPitch) {
+					float nextPitch = Math.max(-90.0f, Math.min(90.0f, playerPitch + gcdPitch));
+					mc.player.setPitch(nextPitch);
+					pitchAccumulator -= gcdPitch;
 				}
 			}
 		}
@@ -203,22 +228,19 @@ public final class AimAssist extends Module implements HudListener, MouseMoveLis
 		return start + (MathHelper.wrapDegrees(end - start) * delta);
 	}
 
-	public static double easeOutBackDegrees(double start, double end, float speed) {
-		double c1 = 1.70158;
-		double c3 = 2.70158;
-		double x = 1 - Math.pow(1 - (double) speed, 3);
-
-		return start + MathHelper.wrapDegrees(end - start) * (1 + c3 * Math.pow(x - 1, 3) + c1 * Math.pow(x - 1, 2));
+	public double smoothStepLerp(double delta, double start, double end) {
+		delta = Math.max(0, Math.min(1, delta));
+		double t = delta * delta * (3 - 2 * delta);
+		return start + MathHelper.wrapDegrees((float) (end - start)) * t;
 	}
 
-	public double smoothStepLerp(double delta, double start, double end) {
-		double value;
-		delta = Math.max(0, Math.min(1, delta));
-
-		double t = delta * delta * (3 - 2 * delta);
-
-		value = start + MathHelper.wrapDegrees(end - start) * t;
-		return value;
+	public double curveLerp(double delta, double start, double end) {
+		delta = Math.max(0.0, Math.min(1.0, delta));
+		double base = (1.0 - Math.cos(Math.PI * delta)) / 2.0;
+		double arc = 0.04 * Math.sin(Math.PI * Math.pow(delta, 1.15));
+		double factor = Math.min(1.0, Math.max(0.0, base + arc));
+		double noise = ThreadLocalRandom.current().nextGaussian() * 0.02;
+		return start + (MathHelper.wrapDegrees((float) (end - start)) * factor) + noise;
 	}
 
 	@Override
