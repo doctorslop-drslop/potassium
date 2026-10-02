@@ -11,8 +11,7 @@ import net.raphimc.immediatelyfast.module.setting.NumberSetting;
 import net.raphimc.immediatelyfast.utils.*;
 import net.raphimc.immediatelyfast.utils.rotation.Rotation;
 import net.minecraft.entity.player.PlayerEntity;
-import net.minecraft.item.AxeItem;
-import net.minecraft.item.SwordItem;
+import net.minecraft.registry.tag.ItemTags;
 import net.minecraft.util.hit.EntityHitResult;
 import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec3d;
@@ -135,7 +134,7 @@ public final class AimAssist extends Module implements HudListener, MouseMoveLis
 		if (mc.player == null || mc.currentScreen != null)
 			return;
 
-		if (onlyWeapon.getValue() && !(mc.player.getMainHandStack().getItem() instanceof SwordItem || mc.player.getMainHandStack().getItem() instanceof AxeItem))
+		if (onlyWeapon.getValue() && !(mc.player.getMainHandStack().isIn(ItemTags.SWORDS) || mc.player.getMainHandStack().isIn(ItemTags.AXES)))
 			return;
 
 		if (onLeftClick.getValue() && GLFW.glfwGetMouseButton(mc.getWindow().getHandle(), GLFW.GLFW_MOUSE_BUTTON_LEFT) != GLFW.GLFW_PRESS)
@@ -154,7 +153,7 @@ public final class AimAssist extends Module implements HudListener, MouseMoveLis
 			resetSpeed.reset();
 		}
 
-		Vec3d targetPos = posMode.isMode(PosMode.Normal) ? target.getPos() : target.getLerpedPos(mc.getRenderTickCounter().getTickProgress(true));
+		Vec3d targetPos = posMode.isMode(PosMode.Normal) ? target.getPos() : target.getLerpedPos(mc.getRenderTickCounter().getTickDelta(true));
 
 		if (aimAt.isMode(AimMode.Chest))
 			targetPos = targetPos.add(0, -0.5, 0);
@@ -173,7 +172,7 @@ public final class AimAssist extends Module implements HudListener, MouseMoveLis
 		if (angleToRotation > (double) fov.getValueInt() / 2)
 			return;
 
-		float frameFactor = Math.min(2.0f, Math.max(0.1f, mc.getLastFrameDuration()));
+		float frameFactor = Math.min(2.0f, Math.max(0.1f, mc.getRenderTickCounter().getLastFrameDuration()));
 		float yawStrength = (currentYawSpeed / 50.0f) * frameFactor;
 		float pitchStrength = (currentPitchSpeed / 50.0f) * frameFactor;
 
